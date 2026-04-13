@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Experiment outputs
+exp/
+results/
+*.pth
+*.pt
+*.bin
+
+# Logs
+*.log
+nohup.out
+
+# Data cache
+data_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
