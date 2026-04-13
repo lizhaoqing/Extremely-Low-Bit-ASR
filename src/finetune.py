@@ -15,6 +15,40 @@ from aq_engine import replace_parameter_
 from src.aq import set_layer_precision
 
 
+def _multi_precision_loss(
+    layer: nn.Module,
+    inp: torch.Tensor,
+    out_target: torch.Tensor,
+    num_precisions: int,
+    kwargs: dict,
+    alpha: float = 0.01,
+) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+    """
+    Compute multi-precision MSE losses for a single batch.
+
+    Returns (total_loss, mse_losses, reg_losses) where:
+      mse_losses[i] = MSE(precision_i output, ground truth)  — one per precision, high→low
+      reg_losses[i]  = MSE(precision_i+1 output, precision_0 output.detach())
+      total_loss     = mse_losses[0] + sum(mse_losses[1:]) + alpha * sum(reg_losses)
+
+    Restores layer precision to -1 (highest) before returning.
+    """
+    mse_losses: List[torch.Tensor] = []
+    reg_losses: List[torch.Tensor] = []
+    out_highest = None
+    for idx, prec in enumerate(range(num_precisions - 1, -1, -1)):
+        set_layer_precision(layer, prec)
+        out, *_ = layer(inp, **kwargs)
+        mse_losses.append(F.mse_loss(out, out_target))
+        if idx == 0:
+            out_highest = out.detach()
+        else:
+            reg_losses.append(F.mse_loss(out, out_highest))
+    set_layer_precision(layer, -1)
+    total = mse_losses[0] + sum(mse_losses[1:]) + alpha * sum(reg_losses, torch.tensor(0.0))
+    return total, mse_losses, reg_losses
+
+
 @torch.enable_grad()
 def finetune_groupwise(
     *,
@@ -28,112 +62,111 @@ def finetune_groupwise(
     **kwargs,
 ) -> nn.Module:
     """
-    Fine-tune a module with pre-quantized linear layers so as to minimize MSE between layer-wise inps/outs
-
-    :param layer: a trainable module where linear layers are replaced by QuantizedLinear instances
-    :param inps: a list of tensors of input activations, [nsamples_per_device, seq_len, hidden_size]
-    :param outs: a list of tensors of previous output activations, [nsamples_per_device, seq_len, hidden_size]
-    :param args: quantization hyperparameters from main.py
-    :param kwargs: additional keyword arguments to be passed into layer on each forward
+    Fine-tune a module with pre-quantized linear layers so as to minimize MSE between layer-wise inps/outs.
+    Matches AQLM_f finetune_groupwise: validation-based early stopping, per-precision loss logging.
     """
-    assert isinstance(args.devices, (list, tuple)) and len(args.devices) >= 1, f"Found devices = {args.devices}"
-    assert isinstance(train_inps, (list, tuple)) and isinstance(train_inps, (list, tuple))
+    assert isinstance(args.devices, (list, tuple)) and len(args.devices) >= 1
     assert len(train_inps) == len(train_outs) == len(args.devices)
     for i in range(len(args.devices)):
         assert isinstance(train_inps[i], torch.Tensor) and isinstance(train_outs[i], torch.Tensor)
         if not args.offload_activations:
-            assert train_inps[i].device == train_outs[i].device == args.devices[i], (
-                train_inps[i].device,
-                train_outs[i].device,
-                args.devices,
-            )
+            assert train_inps[i].device == train_outs[i].device == args.devices[i]
         else:
             assert train_inps[i].device == train_outs[i].device == torch.device("cpu")
             assert train_inps[i].is_pinned() and train_outs[i].is_pinned()
 
-    # Enable gradient checkpointing if available
-    if hasattr(layer, 'gradient_checkpointing_enable'):
-        layer.gradient_checkpointing_enable()
+    local_batch_size = args.local_batch_size or 1
+    run_validation = bool(valid_inps and valid_outs)
 
-    # Enable mixed precision training
-    scaler = torch.cuda.amp.GradScaler()
+    # Log number of trainable parameters (mirrors AQLM_f diagnostic)
+    n_params = sum(p.numel() for p in layer.parameters() if p.requires_grad)
+    print(f"Fine-tuning {n_params:,} parameters")
 
-    # Reduce batch size if specified
-    local_batch_size = getattr(args, 'local_batch_size', 1)
-    if local_batch_size is None:
-        local_batch_size = 1
-
-    # Initialize optimizer
-    optimizer = torch.optim.AdamW(
-        layer.parameters(),
+    optimizer = torch.optim.Adam(
+        [p for p in layer.parameters() if p.requires_grad],
         lr=args.finetune_lr,
         betas=(args.finetune_adam_beta1, args.finetune_adam_beta2),
     )
+    scaler = torch.cuda.amp.GradScaler()
 
     best_loss = float('inf')
     best_state = None
     no_improvement = 0
 
+    def _run_epoch(inps_list, outs_list, train: bool):
+        """One pass over inps_list/outs_list. Returns (avg_loss, last_mse_losses, last_reg_losses)."""
+        total_loss = 0.0
+        n_batches = 0
+        last_mse, last_reg = [], []
+        device = args.devices[0]
+        n = inps_list[0].shape[0]
+        indices = torch.randperm(n) if train else torch.arange(n)
+        for batch_start in range(0, n, local_batch_size):
+            batch_ix = indices[batch_start: batch_start + local_batch_size]
+            inp_b = inps_list[0][batch_ix].to(device)
+            out_b = outs_list[0][batch_ix].to(device)
+            batch_kwargs = {
+                k: (v.expand(len(batch_ix), *v.shape[1:]) if isinstance(v, torch.Tensor) and v.shape[0] == 1 and len(batch_ix) > 1 else v)
+                for k, v in kwargs.items()
+            }
+            with torch.cuda.amp.autocast():
+                loss, mse_l, reg_l = _multi_precision_loss(
+                    layer, inp_b, out_b, args.num_precisions, batch_kwargs
+                )
+            if train:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            total_loss += loss.item()
+            n_batches += 1
+            last_mse, last_reg = mse_l, reg_l
+        return total_loss / max(n_batches, 1), last_mse, last_reg
+
     for epoch in range(args.finetune_max_epochs):
-        epoch_loss = 0
-        num_batches = 0
+        layer.train()
+        train_loss, _, _ = _run_epoch(train_inps, train_outs, train=True)
 
-        for i in range(len(args.devices)):
-            # Clear CUDA cache before processing each device
-            torch.cuda.empty_cache()
-            n = train_inps[i].shape[0]
-            # iterate over a single finite pass (one epoch = one pass over all samples)
-            indices = torch.randperm(n)
-            for batch_start in range(0, n, local_batch_size):
-                batch_ix = indices[batch_start: batch_start + local_batch_size]
-                inp_batch = train_inps[i][batch_ix].to(args.devices[i])
-                out_batch = train_outs[i][batch_ix].to(args.devices[i])
-                # tile kwargs tensors (e.g. attention_mask shape [1,...]) to match batch size
-                batch_kwargs = {}
-                for k, v in kwargs.items():
-                    if isinstance(v, torch.Tensor) and v.shape[0] == 1 and len(batch_ix) > 1:
-                        batch_kwargs[k] = v.expand(len(batch_ix), *v.shape[1:])
-                    else:
-                        batch_kwargs[k] = v
-                try:
-                    with torch.cuda.amp.autocast():
-                        loss = F.mse_loss(layer(inp_batch, **batch_kwargs)[0], out_batch)
-
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-
-                    epoch_loss += loss.item()
-                    num_batches += 1
-
-                except RuntimeError as e:
-                    if "out of memory" in str(e):
-                        torch.cuda.empty_cache()
-                        if local_batch_size > 1:
-                            local_batch_size //= 2
-                            print(f"Reduced batch size to {local_batch_size} due to OOM")
-                            continue
-                    raise e
-
-        avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
+        if run_validation:
+            layer.eval()
+            with torch.no_grad():
+                val_loss, last_mse, last_reg = _run_epoch(valid_inps, valid_outs, train=False)
+            monitor_loss = val_loss
+        else:
+            val_loss = float('nan')
+            monitor_loss = train_loss
+            # get per-precision breakdown from one train batch for logging only
+            layer.eval()
+            with torch.no_grad():
+                b = min(local_batch_size, train_inps[0].shape[0])
+                inp_b = train_inps[0][:b].to(args.devices[0])
+                out_b = train_outs[0][:b].to(args.devices[0])
+                bk = {k: (v.expand(b, *v.shape[1:]) if isinstance(v, torch.Tensor) and v.shape[0] == 1 and b > 1 else v) for k, v in kwargs.items()}
+                with torch.cuda.amp.autocast():
+                    _, last_mse, last_reg = _multi_precision_loss(layer, inp_b, out_b, args.num_precisions, bk)
+            layer.train()
 
         if verbose:
-            print(f"Epoch {epoch + 1}/{args.finetune_max_epochs}, Loss: {avg_epoch_loss:.6f}")
+            mse_fmt = [f"{l.item():.2e}" for l in last_mse]
+            reg_fmt = [f"{l.item():.2e}" for l in last_reg]
+            print("-" * 10)
+            print(f"epoch={epoch}  train={train_loss:.2e}  val={val_loss:.2e}")
+            print(f"  mse_losses(high→low): {mse_fmt}")
+            if reg_fmt:
+                print(f"  reg_losses:           {reg_fmt}")
 
-        # Early stopping check
-        if avg_epoch_loss < best_loss:
-            best_loss = avg_epoch_loss
-            best_state = deepcopy(layer.state_dict())
+        if monitor_loss < best_loss:
+            best_loss = monitor_loss
+            if args.finetune_keep_best:
+                best_state = deepcopy(layer.state_dict())
             no_improvement = 0
         else:
             no_improvement += 1
             if no_improvement >= args.finetune_early_stop:
                 if verbose:
-                    print(f"Early stopping triggered after {epoch + 1} epochs")
+                    print(f"Early stopping at epoch {epoch}")
                 break
 
-    # Restore best model state if requested
     if args.finetune_keep_best and best_state is not None:
         layer.load_state_dict(best_state)
 

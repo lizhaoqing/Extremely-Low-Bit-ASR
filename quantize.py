@@ -166,8 +166,12 @@ def quantize_aq(model: PreTrainedModel, data: Sequence, val_data: Optional[Seque
     number_of_quantized_params = 0
     layers = get_layers(model)
 
+    max_layers = getattr(args, 'max_layers', None)
     tick = time.time()
     for layer_index in range(len(layers)):
+        if max_layers is not None and layer_index >= max_layers:
+            print(f"Stopping after {max_layers} layer(s) (--max_layers).")
+            break
         print(f"\n---------------- Layer {layer_index} of {len(layers)} ----------------")
         stats_payload = {}
         start_time = time.time()
@@ -342,8 +346,8 @@ def evaluate_model_on_test_datasets(model, test_data, args, processor, precision
     device = args.devices[0]
     model = model.to(device)
 
-    wer_metric = load_metric("wer")
-    cer_metric = load_metric("cer")
+    wer_metric = load_metric("wer", trust_remote_code=True)
+    cer_metric = load_metric("cer", trust_remote_code=True)
 
     for dataset_name in test_data.keys():
         dataset = test_data[dataset_name]
@@ -745,6 +749,13 @@ def main():
         type=int,
         default=1,
         help="Number of precision levels for multi-precision quantization",
+    )
+
+    parser.add_argument(
+        "--max_layers",
+        type=int,
+        default=None,
+        help="Stop after quantizing (and finetuning) this many layers. Useful for quick trend tests.",
     )
 
     torch.set_num_threads(min(16, torch.get_num_threads()))
