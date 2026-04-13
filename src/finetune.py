@@ -21,7 +21,7 @@ def _multi_precision_loss(
     out_target: torch.Tensor,
     num_precisions: int,
     kwargs: dict,
-    alpha: float = 0.01,
+    alpha: float = 0.5,
 ) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
     """
     Compute multi-precision MSE losses for a single batch.
