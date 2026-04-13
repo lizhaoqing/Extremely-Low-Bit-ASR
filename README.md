@@ -1,7 +1,6 @@
-# CSVQ: Codebook-based Speech Vector Quantization
+# CSVQ (Codebook-Shared Vector Quantization) code for TASLP
 
-Multi-precision additive quantization for HuBERT speech models, evaluated on LibriSpeech CTC.  
-This codebase is built upon [AQLM](https://github.com/Vahe1994/AQLM).
+Multi-precision quantization for HuBERT speech models, evaluated on LibriSpeech CTC.  
 
 ## Requirements
 
