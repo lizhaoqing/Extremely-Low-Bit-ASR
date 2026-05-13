@@ -129,13 +129,31 @@ The precision is controlled by the `decode-precision` field in the decode config
 | `15` | Alternating 1-bit / 2-bit |
 | `0` | Random: 6 layers at 1-bit, 6 layers at 2-bit |
 
-## Expected Results (Switchboard eval2000)
+## Expected Results (WER %)
 
-| Precision | SWBD WER (%) | CH WER (%) | Avg WER (%) |
-|-----------|-------------|------------|-------------|
-| 2-bit | 10.4 | 15.3 | 12.86 |
-| 1.5-bit | ~11 | ~16 | ~13.5 |
-| 1-bit | ~13 | ~19 | ~16 |
+### Hub5'00 (eval2000)
+
+| Precision | SWBD | CallHome | Avg |
+|-----------|------|----------|-----|
+| 2-bit | 7.4 | 15.0 | 11.2 |
+| 1.5-bit | 7.6 | 15.5 | 11.5 |
+| 1-bit | 7.6 | 15.6 | 11.6 |
+
+### RT-02
+
+| Precision | SWBD1 | SWBD2 | SWBD3 | Avg |
+|-----------|-------|-------|-------|-----|
+| 2-bit | 9.0 | 12.8 | 16.3 | 13.0 |
+| 1.5-bit | 9.0 | 13.2 | 16.3 | 13.1 |
+| 1-bit | 9.3 | 13.1 | 16.5 | 13.2 |
+
+### RT-03
+
+| Precision | SWBD | FSH | Avg |
+|-----------|------|-----|-----|
+| 2-bit | 16.7 | 10.5 | 13.7 |
+| 1.5-bit | 17.2 | 10.7 | 14.1 |
+| 1-bit | 17.2 | 10.8 | 14.1 |
 
 ## File Structure
 
