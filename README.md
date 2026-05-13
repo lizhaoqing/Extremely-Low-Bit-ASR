@@ -1,6 +1,6 @@
 # Extremely Low-Bit ASR
 
-Code for *"Towards Extremely Low-Bit and Multi-Precision Conformer and Speech Foundation Model Quantization"* (IEEE/ACM Transactions on Audio, Speech, and Language Processing, 2026).
+Code for *"Towards Extremely Low-Bit and Multi-Precision Conformer and Speech Foundation Model Quantization"* (IEEE/ACM Transactions on Audio, Speech, and Language Processing Submission).
 
 This repository contains two methods:
 
@@ -23,13 +23,3 @@ Quantization-aware training for Conformer ASR on Switchboard, based on ESPnet v0
 
 Please refer to each subdirectory's README for detailed setup and usage instructions.
 
-## Citation
-
-```bibtex
-@article{li2026extremely,
-  title={Towards Extremely Low-Bit and Multi-Precision Conformer and Speech Foundation Model Quantization},
-  author={Li, Zhaoqing and others},
-  journal={IEEE/ACM Transactions on Audio, Speech, and Language Processing},
-  year={2026}
-}
-```
